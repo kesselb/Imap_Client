@@ -354,6 +354,18 @@ class Horde_Imap_Client_SocketTest extends \PHPUnit\Framework\TestCase
         $this->assertNotNull($env->to);
     }
 
+    public function testSelectIgnoresFetchAndVanished()
+    {
+        $pipeline = $this->test_ob->pipeline();
+        $pipeline->data['select'] = true;
+
+        $this->test_ob->doServerResponse($pipeline, '* 1 FETCH (UID 2 MODSEQ (5) FLAGS (\Seen))');
+        $this->test_ob->doServerResponse($pipeline, '* VANISHED 2');
+
+        $this->assertCount(0, $pipeline->fetch);
+        $this->assertEmpty($pipeline->data['modseqs']);
+    }
+
     public function testVanishedCommand()
     {
         // 200 non-consecutive 4-digit UIDs, fits in one 2000-octet command.

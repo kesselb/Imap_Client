@@ -1163,7 +1163,6 @@ class Horde_Imap_Client_Socket extends Horde_Imap_Client_Base
     protected function _openMailbox(Horde_Imap_Client_Mailbox $mailbox, $mode)
     {
         $c = $this->_capability();
-        $qresync = $c->isEnabled('QRESYNC');
 
         $cmd = $this->_command(
             ($mode == Horde_Imap_Client::OPEN_READONLY) ? 'EXAMINE' : 'SELECT'
@@ -1171,60 +1170,17 @@ class Horde_Imap_Client_Socket extends Horde_Imap_Client_Base
             $this->_getMboxFormatOb($mailbox)
         );
         $pipeline = $this->_pipeline($cmd);
+        $pipeline->data['select'] = true;
 
-        /* If QRESYNC is available, synchronize the mailbox. */
-        if ($qresync) {
-            $this->_initCache();
-            $md = $this->_cache->getMetaData($mailbox, null, array(self::CACHE_MODSEQ, 'uidvalid'));
-
-            /* CACHE_MODSEQ can be set but 0 (NOMODSEQ was returned). */
-            if (!empty($md[self::CACHE_MODSEQ])) {
-                if ($uids = $this->_cache->get($mailbox)) {
-                    $uids = $this->getIdsOb($uids);
-
-                    /* Check for extra long UID string. Assume that any
-                     * server that can handle QRESYNC can also handle long
-                     * input strings (at least 8 KB), so 7 KB is as good as
-                     * any guess as to an upper limit. If this occurs, provide
-                     * a range string (min -> max) instead. */
-                    if (strlen($uid_str = $uids->tostring_sort) > 7000) {
-                        $uid_str = $uids->range_string;
-                    }
-                } else {
-                    $uid_str = null;
-                }
-
-                /* Several things can happen with a QRESYNC:
-                 * 1. UIDVALIDITY may have changed.  If so, we need to expire
-                 * the cache immediately (done below).
-                 * 2. NOMODSEQ may have been returned. We can keep current
-                 * message cache data but won't be able to do flag caching.
-                 * 3. VANISHED/FETCH information was returned. These responses
-                 * will have already been handled by those response handlers.
-                 * 4. We are already synced with the local server in which
-                 * case it acts like a normal EXAMINE/SELECT. */
-                $cmd->add(new Horde_Imap_Client_Data_Format_List(array(
-                    'QRESYNC',
-                    new Horde_Imap_Client_Data_Format_List(array_filter(array(
-                        $md['uidvalid'],
-                        $md[self::CACHE_MODSEQ],
-                        $uid_str
-                    )))
-                )));
-            }
-
-            $this->_changeSelected($mailbox, $mode);
-        } else {
-            if (!$c->isEnabled('CONDSTORE') &&
-                $this->_initCache() &&
-                $c->query('CONDSTORE')) {
-                /* Activate CONDSTORE now if ENABLE is not available. */
-                $cmd->add(new Horde_Imap_Client_Data_Format_List('CONDSTORE'));
-                $c->enable('CONDSTORE');
-            }
-
-            $this->_changeSelected($mailbox, $mode);
+        if (!$c->isEnabled('CONDSTORE') &&
+            $this->_initCache() &&
+            $c->query('CONDSTORE')) {
+            /* Activate CONDSTORE now if ENABLE is not available. */
+            $cmd->add(new Horde_Imap_Client_Data_Format_List('CONDSTORE'));
+            $c->enable('CONDSTORE');
         }
+
+        $this->_changeSelected($mailbox, $mode);
 
         try {
             $this->_sendCmd($pipeline);
@@ -1243,11 +1199,6 @@ class Horde_Imap_Client_Socket extends Horde_Imap_Client_Base
                 }
             }
             throw $e;
-        }
-
-        if ($qresync) {
-            /* Mailbox is fully sync'd. */
-            $this->_mailboxOb()->sync = true;
         }
     }
 
@@ -2241,11 +2192,15 @@ class Horde_Imap_Client_Socket extends Horde_Imap_Client_Base
     )
     {
         /* There are two forms of VANISHED.  VANISHED (EARLIER) will be sent
-         * in a FETCH (VANISHED) or SELECT/EXAMINE (QRESYNC) call.
+         * in a FETCH (VANISHED) call.
          * If this is the case, we can go ahead and update the cache
          * immediately (we know we are caching or else QRESYNC would not be
          * enabled). HIGHESTMODSEQ information will be updated via the tagged
          * response. */
+        if (!empty($pipeline->data['select'])) {
+            return;
+        }
+
         if (($curr = $data->next()) === true) {
             if (Horde_String::upper($data->next()) === 'EARLIER') {
                 /* Caching is guaranteed to be active if we are using
@@ -3122,7 +3077,8 @@ class Horde_Imap_Client_Socket extends Horde_Imap_Client_Base
         Horde_Imap_Client_Tokenize $data
     )
     {
-        if ($data->next() !== true) {
+        if (!empty($pipeline->data['select']) ||
+            $data->next() !== true) {
             return;
         }
 
@@ -4264,7 +4220,8 @@ class Horde_Imap_Client_Socket extends Horde_Imap_Client_Base
             $this->_mailboxOb()->setStatus(Horde_Imap_Client::STATUS_HIGHESTMODSEQ, $modseq);
             /* CONDSTORE has not yet updated flag information, so don't update
              * modseq yet. */
-            if ($this->_capability()->isEnabled('QRESYNC')) {
+            if ($this->_capability()->isEnabled('QRESYNC') &&
+                empty($pipeline->data['select'])) {
                 $this->_updateModSeq($modseq);
             }
         }
